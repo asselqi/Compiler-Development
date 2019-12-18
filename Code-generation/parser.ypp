@@ -1,0 +1,957 @@
+
+
+%{
+	#include <iostream>
+	#include <stdlib.h>
+	#include <string.h>
+	#include "output.hpp"
+	#include "attributes.hpp"
+	#include "RegisterAuxiliary.hpp"
+	#include "bp.hpp"
+	#include <sstream>
+	using namespace std;
+	
+	extern int yylex();
+	extern int yylineno;
+	void yyerror(const char* message); 
+	
+	string toString(int number) {
+		ostringstream string_num;
+		string_num << number;
+		string str_out = string_num.str();
+		return str_out; 
+	}
+	
+	vector<int> offsets; //a vector that holds the offsets as shown in the tutorial 
+	vector<Table> tables; //a vector that holds the tables of scopes as shown in the tutorial 
+	int func_arg_offset = 0;	//the offset of the current argument
+	int precond_number = 0; //the number of the preconds of the function
+	bool open_new_scope = false; //a flag to check if we need to open a new scope, in cases like if/else, while, etc..
+	string expected_ret_type; //the expected return type of the function we are dealing with
+	bool close_current_scope = false; //a flag to check if we need to close the current scope
+	int empty_scope = 0;
+	int fun_dec_line_num;
+	int whiles_num = 0;
+	int if_else_num = 0;
+	bool is_block = false;
+	// HW5
+	int string_counter = 1;
+	Registers reg_pool = Registers();
+	static CodeBuffer& buffer = CodeBuffer::instance();
+	//Function Declaration
+	void initializeProg(); 
+	void endProg(); 
+	void makeTable(); 
+	void addFuncToTable(string retType, string funcName); 
+	bool alreadyDefined(string identefier, bool new_decliration, bool is_function); 
+	void closeScope(string identefier, bool is_function); 
+	void addSymbol(string type, string identefier); 
+	void addArg(string type, string identefier);
+	bool legalAssign(string lhs_type, string rhs_type); 
+	Symbol getSymbol(string identefier); 
+	void updateVal(string identefier, int val); 
+	string validCall(string funcName, vector<string> args_lsit);
+	void copyAllValues(STYPE& a, STYPE& b);
+	// HW5 functions declaration
+	string getVarValueToReg(string var_name);
+	void updateVarInStack(string var_name, string new_val);
+	void makeFuncLabel(string func_name);
+%}
+ 
+%token VOID;
+%token INT;
+%token BYTE;
+%token B;
+%token BOOL;
+%left AND;
+%left OR;
+%left NOT;
+%token TRUE;
+%token FALSE;
+%token RETURN;
+%token IF;
+%nonassoc NO_ELSE
+%nonassoc ELSE;
+%token WHILE;
+%token BREAK;
+%token CONTINUE;
+%token PRECOND;
+%token SC;
+%token COMMA;
+%token LPAREN;
+%token LBRACE;
+%token RBRACE;
+%token RPAREN;
+%left ASSIGN;
+%nonassoc RELOP;
+%left BINOPSP;
+%left BINOPFP;
+%token ID;
+%token NUM;
+%token STRING;
+%token END_OF_FILE;
+%%
+
+Program : { initializeProg(); } Funcs END_OF_FILE { endProg(); exit(0); }
+;
+
+M: /*epsilon */ { $$.quad = buffer.genLabel(); }
+
+N: /*epsilon*/ { $$.quad = buffer.genLabel();
+				 int address = buffer.emit("j ");
+				 $$.nextList = buffer.makelist(address); }
+
+Funcs : /*epsilon*/ {} 
+
+				| FuncDel Funcs {}
+;
+
+/*FuncDel : RetType ID { fun_dec_line_num = yylineno;
+					   expected_ret_type = $1.type;
+					   func_arg_offset = 0;
+					   makeTable();
+					   makeFuncLabel($2.name);
+					   $$.nextList = buffer.makelist(buffer.emit("j ")); }
+			LPAREN Formals RPAREN M PreConditions { addFuncToTable($1.type, $2.name);
+													if (precond_number) {
+														string label = buffer.genLabel();
+														buffer.emit("la $t0, " + $2.name);
+														buffer.emit("j precond_1");
+														$$.quad = label; 
+													} }																	   
+			LBRACE M Statements M RBRACE { buffer.bpatch($3.nextList, $7.quad);
+										   buffer.bpatch($8.trueList, $11.quad);
+										   buffer.bpatch($8.falseList, $9.quad);
+										   buffer.bpatch($12.nextList, $13.quad);
+										   precond_number = 0;
+										   closeScope($2.name, true);
+										   buffer.emit("jr $ra"); }
+																							 
+;*/
+
+FuncDel:       RetType ID LPAREN { makeTable(); $$.quad = buffer.genLabel(); }
+			   Formals RPAREN {	expected_ret_type = $1.type;
+								fun_dec_line_num = yylineno;
+								addFuncToTable($1.type, $2.name);
+								//$$=new Node();
+								makeFuncLabel($2.name);
+								$$.nextList = buffer.makelist(buffer.emit("j "));
+								string quad = buffer.genLabel();
+								string num = toString(string_counter++);
+								buffer.emitData("str" + num + ": .asciiz	" + "\"" + $2.name + "\"");
+								string labelData = "str" + num;
+								buffer.emit("la $t0, " + labelData);
+								buffer.emit("j precond_1");
+								$$.quad = quad; } 
+		M PreConditions M LBRACE Statements RBRACE { closeScope($2.name, true);
+													 precond_number = 0;
+													 buffer.bpatch($7.nextList, $8.quad); //jump to preconditon
+													 buffer.bpatch($9.trueList, $10.quad);
+													 buffer.bpatch($9.falseList, $7.quad); //jump to error label
+													 string label = buffer.genLabel();
+													 buffer.bpatch($12.nextList, label);
+													 if($2.name == "main"){
+														buffer.emit("li $v0, 10");
+														buffer.emit("syscall");
+														buffer.emit(".end main");
+													 } else {
+														buffer.emit("jr $ra");
+													 } }
+
+;
+
+RetType : Type { $$.type = $1.type; }
+
+			| VOID { $$.type = $1.type; }
+;
+
+Formals : /*epsilon*/ {}
+		| FormalsList {}
+;
+
+FormalsList : FormalDecl {}
+
+			| FormalDecl COMMA FormalsList {}
+;
+
+FormalDecl : Type ID { addArg($1.type, $2.name); }
+;
+
+PreConditions : /*epsilon*/ { $$.trueList = vector<int>();
+							  $$.falseList = vector<int>(); }
+ 
+				| PreConditions M PreCondition { buffer.bpatch($1.trueList, $2.quad);
+												 $$.trueList = $3.trueList;
+                                                 $$.falseList = buffer.merge($1.falseList, $3.falseList); }
+;
+
+PreCondition : PRECOND LPAREN Exp RPAREN { if ($3.type != "BOOL") {
+											   output::errorMismatch(yylineno);
+											   exit(0);
+                                           }
+										   copyAllValues($$, $3);
+										   precond_number++; } 
+;
+
+Statements : Statement	{ copyAllValues($$, $1); }
+			| Statements M Statement { buffer.bpatch($1.nextList, $2.quad);
+									   $$.nextList = $3.nextList;
+									   $$.breakList = buffer.merge($1.breakList, $3.breakList);
+									   $$.continueList = buffer.merge($1.continueList, $3.continueList); }
+;
+
+Statement: LBRACE { open_new_scope = false; 
+					makeTable(); } Statements RBRACE { closeScope("", false);
+													   $$.nextList = $3.nextList;
+													   $$.breakList = $3.breakList;
+													   $$.continueList = $3.continueList; }	
+		| Type ID SC 	{ if (open_new_scope)
+							  makeTable();
+						  addSymbol($1.type, $2.name);
+						  if (open_new_scope) {
+							  closeScope("", false);
+							  open_new_scope = false;
+						  }
+						  buffer.emit("subu, $sp, $sp, 4"); }
+						  
+		| Type ID ASSIGN Exp SC  { if (open_new_scope)
+									   makeTable();
+								   if (!legalAssign($1.type, $4.type)) {
+									   output::errorMismatch(yylineno);
+									   exit(0);
+								   }
+								   if ($1.type == "BYTE" && $4.val > 255) {
+									   output::errorByteTooLarge(yylineno, toString($4.val));
+									   exit(0);
+								   }
+								   addSymbol($1.type, $2.name);
+								   if (open_new_scope) {
+									   closeScope("", false);
+									   open_new_scope = false;
+								   }
+								   if ($4.type == "BOOL") {
+									   string reg = reg_pool.getReg();
+									   buffer.bpatch($4.trueList, buffer.genLabel());
+									   buffer.emit("li " + reg + ", 1");
+									   int skip = buffer.emit("j ");
+									   buffer.bpatch($4.falseList, buffer.genLabel());
+									   buffer.emit("li " + reg + ", 0");
+									   buffer.bpatch(buffer.makelist(skip), buffer.genLabel());
+									   buffer.emit("subu $sp, $sp, 4");
+									   buffer.emit("sw " + reg + ", 0($sp)");
+									   reg_pool.freeReg(reg);
+								   } else {
+									   buffer.emit("subu $sp, $sp, 4");
+									   buffer.emit("sw " + $4.reg + ", 0($sp)");
+									   reg_pool.freeReg($4.reg);
+								   } }		
+									 
+		| ID ASSIGN Exp SC	{ if (!alreadyDefined($1.name, false, false)) {
+									 output::errorUndef(yylineno, $1.name);
+									 exit(0);
+			                     }
+								 if (!legalAssign(getSymbol($1.name).type, $3.type)) {
+									 output::errorMismatch(yylineno);
+									 exit(0);
+								 }
+								 if (getSymbol($1.name).type == "BYTE" && $3.val > 255) {
+									 output::errorByteTooLarge(yylineno, toString($3.val));
+									 exit(0);
+			                     }
+								 updateVal($1.name, $3.val); 
+								 if (open_new_scope) {
+									closeScope("", false);
+									open_new_scope = false;
+								 } 
+								 string reg;
+								 if ($3.type == "BOOL") {
+									int offset = getSymbol($1.name).offset;
+								    int distance = offset*(-4);
+							        string reg = reg_pool.getReg();
+									buffer.bpatch($3.trueList, buffer.genLabel());
+							        buffer.emit("li " + reg + ", 1");
+									buffer.emit("sw " + reg + ", " + toString(distance) +"($fp)");
+							        int skip = buffer.emit("j ");
+							        buffer.bpatch($3.falseList, buffer.genLabel());
+									buffer.emit("li " + reg + ", 0");
+									buffer.emit("sw " + reg + ", " + toString(distance) +"($fp)");
+							        buffer.bpatch(buffer.makelist(skip), buffer.genLabel());  
+								 } else {
+									reg = $3.reg;
+									updateVarInStack($1.name, reg);
+								 }
+								 reg_pool.freeReg(reg); }			
+								
+		| Call SC {}					
+		| RETURN SC	{ if (expected_ret_type != "VOID") {
+						  output::errorMismatch(yylineno);
+						  exit(0);
+					  } 
+					  int stack_pop = 0;
+					  //might need to fix local vars poping 
+					  for (int j = 1; j < tables.size(); j++) {
+						  vector<Symbol> local_vars = tables[j].getSymbolsVector();
+						  for (int i = 0; i < local_vars.size(); i++) {
+							  if (local_vars[i].offset >= 0)
+								 stack_pop += 4;
+						 }	  
+					  }
+					  buffer.emit("addu $sp, $sp, " +toString(stack_pop));
+					  buffer.emit("jr $ra"); }
+					  
+		| RETURN Exp SC	{ if ((expected_ret_type != $2.type && 
+							  !(expected_ret_type == "INT" && $2.type == "BYTE")) ||
+							  expected_ret_type == "VOID") {
+								  output::errorMismatch(yylineno);
+								  exit(0);
+			                  } 
+							  if ($2.type == "BOOL") {
+								  buffer.bpatch($2.trueList, buffer.genLabel());
+								  buffer.emit("li $v0, 1");
+								  int skip = buffer.emit("j ");
+								  buffer.bpatch($2.falseList, buffer.genLabel());
+								  buffer.emit("li $v0, 0");
+								  buffer.bpatch(buffer.makelist(skip), buffer.genLabel());
+							  } else {
+								  buffer.emit("addu $v0, " + $2.reg + ", 0");
+								  reg_pool.freeReg($2.reg);
+							  }
+							  //might need to fix local vars poping 
+							  int stack_pop = 0; 
+							  for (int j = 1; j < tables.size(); j++) {
+								  vector<Symbol> local_vars = tables[j].getSymbolsVector();
+								  for (int i = 0; i < local_vars.size(); i++) {
+									  if (local_vars[i].offset >= 0)
+										 stack_pop += 4;
+								 }	  
+							  }
+							  buffer.emit("addu $sp, $sp, " +toString(stack_pop));
+							  buffer.emit("jr $ra"); }
+
+
+		| IF_ELSE_STATEMENT 			{ copyAllValues($$,$1); }
+										  
+		| WHILE M { whiles_num++; }  LPAREN Exp_bool RPAREN
+		  M { open_new_scope = true; } Statement { open_new_scope = false;
+												   whiles_num--;
+												   buffer.bpatch($5.trueList, $7.quad);
+												   buffer.bpatch($9.nextList, $2.quad);
+												   buffer.bpatch($9.continueList, $2.quad);
+												   buffer.emit("j " + $2.quad);
+												   $$.nextList = buffer.merge($5.falseList, $9.breakList);
+												   reg_pool.freeReg($5.reg); } 		
+																											
+		| BREAK SC	{ if (whiles_num == 0) {
+						  output::errorUnexpectedBreak(yylineno);
+						  exit(0);
+					  } 
+					  int stack_pop = 0; 
+					  vector<Symbol> local_vars = tables.back().getSymbolsVector();
+					  for (int i = 0; i < local_vars.size(); i++) {
+						   if (local_vars[i].offset >= 0)
+						   	   stack_pop += 4;
+					  }
+					  buffer.emit("addu $sp, $sp, " +toString(stack_pop));
+					  int break_address = buffer.emit("j ");
+					  $$.breakList = buffer.makelist(break_address); }					
+					  
+		| CONTINUE SC { if (whiles_num == 0) {
+					output::errorUnexpectedContinue(yylineno);
+					exit(0);
+				} 
+				if (open_new_scope) {
+					closeScope("", false);
+					open_new_scope = false;
+				}
+				int stack_pop = 0; 
+				vector<Symbol> local_vars = tables.back().getSymbolsVector();
+				for (int i = 0; i < local_vars.size(); i++) {
+					 if (local_vars[i].offset >= 0)
+						 stack_pop += 4;
+				}
+				buffer.emit("addu $sp, $sp, " +toString(stack_pop));
+				int continue_address = buffer.emit("j ");
+				$$.continueList = buffer.makelist(continue_address); }
+;
+
+IF_ELSE_STATEMENT:  IF LPAREN  Exp_bool  RPAREN M
+					in_if_else_Statement %prec NO_ELSE	{ buffer.bpatch($3.trueList, $5.quad);
+														  $$.nextList = buffer.merge($3.falseList, $6.nextList);
+														  $$.breakList = $6.breakList;
+														  $$.continueList = $6.continueList;
+														  reg_pool.freeReg($3.reg); }
+														  
+		| IF LPAREN Exp_bool RPAREN M in_if_else_Statement
+		  ELSE N M in_if_else_Statement	{ buffer.bpatch($3.trueList, $5.quad);
+										  buffer.bpatch($3.falseList, $9.quad);
+										  vector<int> next = buffer.merge($3.nextList, $8.nextList);
+										  $$.nextList = buffer.merge(next, $10.nextList);
+										  $$.breakList = buffer.merge($6.breakList, $10.breakList);
+										  $$.continueList = buffer.merge($6.continueList, $10.continueList);
+										  reg_pool.freeReg($3.reg); }
+										
+;
+	
+
+in_if_else_Statement: { open_new_scope = true; } Statement 	{ open_new_scope = false;
+															  $$.nextList = $2.nextList;
+															  $$.continueList = $2.continueList;
+															  $$.breakList = $2.breakList; }
+;
+
+Exp_bool: Exp 	{ if ($1.type != "BOOL") {
+					 output::errorMismatch(yylineno);
+					 exit(0);
+				 }
+				 $$.type = "BOOL";
+				 $$.trueList = $1.trueList;
+				 $$.falseList = $1.falseList;
+				 $$.nextList = $1.nextList;
+				 $$.reg = $1.reg; }
+;
+																	   
+Call : ID LPAREN ExpList RPAREN { $$.type = validCall($1.name, $3.args_types);
+								  vector<string> used_regs = reg_pool.getUsedRegs(); 
+								  for (int i = 0; i < used_regs.size(); i++) { //save registers
+									  string reg = used_regs[i];
+									  buffer.emit("subu $sp, $sp, 4");
+									  buffer.emit("sw " + reg + ", 0($sp)");
+								  }
+								  reg_pool.deallocateAllRegs();
+								  //save old frame and return address//
+								  buffer.emit("subu $sp, $sp, 4");
+								  buffer.emit("sw $fp, 0($sp)");
+								  buffer.emit("subu $sp, $sp, 4");
+								  buffer.emit("sw $ra, 0($sp)");
+								  ////////////////////////////////////
+								  //save function arguments//
+                                  for (int i = $3.regsList.size() - 1; i >= 0; i--) {
+									  buffer.emit("subu $sp, $sp, 4");
+									  buffer.emit("sw " + $3.regsList[i] + ", 0($sp)");  
+								  }
+								  ///////////////////////////
+								  //branching to the function label and saving local variables//
+								  buffer.emit("jal " + $1.name);
+								  
+								  //poping function arguments from stack//
+								  for (int i = $3.regsList.size() - 1; i >= 0; i--)
+									  buffer.emit("addu $sp, $sp, 4");
+								  
+								  buffer.emit("lw $ra, 0($sp)");
+								  buffer.emit("addu $sp, $sp, 4");
+								  buffer.emit("lw $fp, 0($sp)");
+								  buffer.emit("addu $sp, $sp, 4");
+								  
+                                  for (int i = used_regs.size() - 1; i >= 0; i--) {
+									  string reg = used_regs[i];
+									  bool in_regsList = false;
+									  for (int i = 0; i < $3.regsList.size(); i++) {
+										  if ($3.regsList[i] == reg) {
+											  in_regsList = true;
+											  break;
+										  }
+									  }
+									  if (!in_regsList) {
+										  reg = reg_pool.getReg(reg);
+										  buffer.emit("lw " + reg + ", 0($sp)");
+									  }
+									  buffer.emit("addu, $sp, $sp, 4");
+								  }	}
+
+       | ID LPAREN RPAREN { vector<string> empty_args_vec;
+							$$.type = validCall($1.name, empty_args_vec);
+						    vector<string> used_regs = reg_pool.getUsedRegs(); 
+						    for (int i = 0; i < used_regs.size(); i++) {
+							    string reg = used_regs[i];
+							    buffer.emit("subu $sp, $sp, 4");
+							    buffer.emit("sw " + reg + ", 0($sp)");
+						    }
+						    reg_pool.deallocateAllRegs();
+						    buffer.emit("subu $sp, $sp, 4");
+						    buffer.emit("sw $fp, 0($sp)");
+						    buffer.emit("subu $sp, $sp, 4");
+						    buffer.emit("sw $ra, 0($sp)");
+						    buffer.emit("jal " + $1.name);
+						    buffer.emit("lw $ra, 0($sp)");
+						    buffer.emit("addu $sp, $sp, 4");
+						    buffer.emit("lw $fp, 0($sp)");
+						    buffer.emit("addu $sp, $sp, 4");
+						    for (int i = used_regs.size() - 1; i >= 0; i--) {
+						   	    string reg = used_regs[i];
+							    reg = reg_pool.getReg(reg);
+							    buffer.emit("lw " + reg + ", 0($sp)");
+							    buffer.emit("addu, $sp, $sp, 4");
+						    }}
+;
+
+ExpList : Exp { if ($1.type == "BOOL") {
+					string reg = reg_pool.getReg();
+					buffer.bpatch($1.trueList, buffer.genLabel());
+					buffer.emit("li " + reg + ", 1");
+					int skip = buffer.emit("j ");
+					buffer.bpatch($1.falseList, buffer.genLabel());
+					buffer.emit("li " + reg + ", 0");
+					buffer.bpatch(buffer.makelist(skip), buffer.genLabel());
+					$1.reg = reg;
+				}
+				$$.args_types.push_back($1.type);
+				$$.regsList.push_back($1.reg); }
+
+		  | Exp COMMA  { if ($1.type == "BOOL") {
+							 string reg = reg_pool.getReg();
+							 buffer.bpatch($1.trueList, buffer.genLabel());
+							 buffer.emit("li " + reg + ", 1");
+							 int skip = buffer.emit("j ");
+							 buffer.bpatch($1.falseList, buffer.genLabel());
+						     buffer.emit("li " + reg + ", 0");
+							 buffer.bpatch(buffer.makelist(skip), buffer.genLabel());
+							 $1.reg = reg;
+						} } ExpList { $$.args_types.push_back($1.type);
+									  $$.regsList.push_back($1.reg);
+									  for (int i = 0; i < $4.args_types.size(); i++) {
+										  $$.args_types.push_back($4.args_types[i]);
+										  $$.regsList.push_back($4.regsList[i]);
+									  } }
+;
+
+Type : INT {$$.type = "INT";}
+
+		| BYTE {$$.type = "BYTE";}
+	
+		| BOOL {$$.type = "BOOL";}
+;
+
+Exp : LPAREN Exp RPAREN { copyAllValues($$,$2); }
+	  
+	  | Exp BINOPFP Exp { if (($1.type == "INT" && $3.type == "INT") || 
+							  ($1.type == "INT" && $3.type == "BYTE") ||
+							  ($3.type == "INT" && $1.type == "BYTE")) {
+								$$.type = "INT";
+						  } else if ($1.type == "BYTE" && $3.type == "BYTE") {
+							  $$.type = "BYTE";								
+						  } else {
+							  output::errorMismatch(yylineno);
+							  exit(0);
+						  }
+						  if ($2.name == "*") {
+							  buffer.emit("mul " + $1.reg + ", " + $1.reg + ", " + $3.reg);
+						  }
+						  if ($2.name == "/") {
+							  buffer.emit("beq " + $3.reg + ", 0, zeroDivision");
+							  buffer.emit("div " + $1.reg + ", " + $1.reg + ", " + $3.reg);
+						  }
+						  if ($$.type == "BYTE")
+							  buffer.emit("and " + $1.reg + ", " + $1.reg + ", 255"); 
+						  $$.reg = $1.reg;
+						  reg_pool.freeReg($3.reg);	}
+						  
+	  | Exp BINOPSP Exp { if (($1.type == "INT" && $3.type == "INT")|| 
+							  ($1.type == "INT" && $3.type == "BYTE") ||
+							  ($3.type == "INT"&& $1.type == "BYTE")) {
+							   $$.type = "INT";
+						  } else if ($1.type == "BYTE" && $3.type == "BYTE") {
+							  $$.type = "BYTE";								
+						  } else {
+							  output::errorMismatch(yylineno);
+							  exit(0);
+						  }
+						  if ($2.name == "+") {
+							  buffer.emit("addu " + $1.reg + ", " + $1.reg + ", " + $3.reg);
+						  }
+						  if ($2.name == "-") {
+							  buffer.emit("subu " + $1.reg + ", " + $1.reg + ", " + $3.reg);
+						  }
+						  if ($$.type == "BYTE")
+							  buffer.emit("and " + $1.reg + ", " + $1.reg + ", 255"); 
+						  $$.reg = $1.reg;
+						  reg_pool.freeReg($3.reg);	}
+						  
+	  | ID              { if (!alreadyDefined($1.name, false, false)) {
+							  output::errorUndef(yylineno, $1.name);
+							  exit(0);
+						  }
+						  $$.name = getSymbol($1.name).name;
+						  $$.type = getSymbol($1.name).type;
+						  $$.val = getSymbol($1.name).val; 
+						  if (getSymbol($1.name).type != "BOOL") {
+							  $$.reg = getVarValueToReg($1.name);
+						  } else {
+							  int offset = getSymbol($1.name).offset;
+							  int distance = offset*(-4);
+							  string reg = reg_pool.getReg();
+							  buffer.emit("lw " + reg + ", " + toString(distance) + "($fp)");
+							  int true_jmp = buffer.emit("beq " + reg + ", 1, ");
+							  $$.trueList = buffer.makelist(true_jmp);
+							  $$.falseList = buffer.makelist(buffer.emit("j "));
+							  reg_pool.freeReg(reg);
+						  } }
+						  
+	  | Call			{ $$.val = $1.val;
+	                      $$.type = $1.type;
+						  if ($1.type == "BOOL") {
+							  $$.trueList = buffer.makelist(buffer.emit("beq $v0, 1, "));
+							  $$.falseList = buffer.makelist(buffer.emit("j "));
+						  } else {
+							  $1.reg = reg_pool.getReg();
+							  buffer.emit("addu " + $1.reg + ", $v0, 0");
+							  $$.reg = $1.reg;
+						  }	}
+						  
+	  | NUM             { $$.val = $1.val;
+						  $$.type = "INT"; 
+						  $$.reg = reg_pool.getReg();
+						  buffer.emit("li " + $$.reg + ", " + toString($1.val)); }
+						  
+	  | NUM B           { if ($1.val > 255) {
+							  output::errorByteTooLarge(yylineno,toString($1.val));
+							  exit(0);
+						  }
+						  $$.val = $1.val;
+						  $$.type = "BYTE"; 
+						  $$.reg = reg_pool.getReg();
+						  buffer.emit("li " + $$.reg + ", " + toString($1.val)); }
+						  
+	  | STRING          { $$.type = "STRING"; 
+                          string num = toString(string_counter++);
+						  buffer.emitData("str" + num + ": .asciiz	" + $1.name);
+						  $$.reg = reg_pool.getReg();
+						  buffer.emit("la " + $$.reg + ", str" + num); }
+						  
+	  | TRUE			{ $$.type = "BOOL";
+						  int address = buffer.emit("j ");
+						  $$.trueList = buffer.makelist(address);
+						  $$.falseList = vector<int>(); }
+						
+	  | FALSE           { $$.type = "BOOL";
+						  int address = buffer.emit("j ");
+						  $$.falseList = buffer.makelist(address);
+						  $$.trueList = vector<int>(); }
+						  
+	  | NOT Exp         { if ($2.type != "BOOL"){
+							  output::errorMismatch(yylineno);
+							  exit(0);
+						  }
+						  $$.type = "BOOL";
+						  $$.trueList = $2.falseList;
+						  $$.falseList = $2.trueList; }
+						  
+	  | Exp AND M Exp   { if ($1.type != "BOOL" || $4.type != "BOOL") {
+							  output::errorMismatch(yylineno);
+							  exit(0);
+						  }
+						  $$.type = "BOOL";
+						  buffer.bpatch($1.trueList, $3.quad);
+						  $$.trueList = $4.trueList;
+						  $$.falseList = buffer.merge($1.falseList, $4.falseList);
+						  $$.val = ($1.val && $1.val) ? 1 : 0; }
+						  
+	  | Exp OR M Exp	{ if ($1.type != "BOOL" || $4.type != "BOOL") {
+							  output::errorMismatch(yylineno);
+							  exit(0);
+		                  }
+						  $$.type = "BOOL";
+						  buffer.bpatch($1.falseList, $3.quad);
+						  $$.trueList = buffer.merge($1.trueList, $4.trueList);
+						  $$.falseList = $4.falseList;					  
+						  $$.val = ($1.val || $1.val) ? 1 : 0; }
+						  
+	  | Exp RELOP Exp	{ if ((($1.type == "INT") &&($3.type == "INT" || $3.type == "BYTE")) ||
+							  (($1.type == "BYTE")&&($3.type == "INT" || $3.type == "BYTE"))) {
+								$$.type = "BOOL";
+						  } else {
+								output::errorMismatch(yylineno);
+								exit(0);
+						  }
+                          int next_inst_address;
+						  if($2.name == "==") 
+							  next_inst_address = buffer.emit("beq " + $1.reg + ", " + $3.reg + ", ");
+						  if($2.name == "!=") 
+							  next_inst_address = buffer.emit("bne " + $1.reg + ", " + $3.reg + ", ");
+						  if($2.name == ">") 
+							  next_inst_address = buffer.emit("bgt " + $1.reg + ", " + $3.reg + ", ");
+						  if($2.name == "<") 
+							  next_inst_address = buffer.emit("blt " + $1.reg + ", " + $3.reg + ", ");
+						  if($2.name == ">=") 
+							  next_inst_address = buffer.emit("bge " + $1.reg + ", " + $3.reg + ", ");
+						  if($2.name == "<=") 
+							  next_inst_address = buffer.emit("ble " + $1.reg + ", " + $3.reg + ", ");
+						  $$.trueList = buffer.makelist(next_inst_address);
+						  $$.falseList = buffer.makelist(buffer.emit("j "));
+						  reg_pool.freeReg($1.reg);
+						  reg_pool.freeReg($3.reg); }
+;
+%%
+
+//the main function that starts the parser
+int main(){
+	yyparse();
+}
+
+//initialize the program
+void initializeProg() {
+	
+	///////// add print & printi to init_table ////////////////////
+	Table global_table = Table();
+	
+	vector<string> print_argTypes;
+	print_argTypes.push_back("STRING");
+	vector<string> printi_argTypes;
+	printi_argTypes.push_back("INT");
+	
+	Symbol print_symbol = {"print", output::makeFunctionType("VOID", print_argTypes) , 0, 0, print_argTypes, "VOID"}; 	// val = ?
+	Symbol printi_symbol = {"printi", output::makeFunctionType("VOID", printi_argTypes), 0, 0, printi_argTypes, "VOID"};	// val = ?
+	
+	global_table.push(print_symbol);
+	global_table.push(printi_symbol);
+	/////////////////HW5///////////////////////
+	
+	buffer.emit(".globl main");
+	buffer.emit(".ent main");
+	
+	// insert printi
+	buffer.emit("printi:");
+	buffer.emit("lw $a0, 0($sp)");
+	buffer.emit("li $v0, 1");
+	buffer.emit("syscall");
+	buffer.emit("jr $ra");
+
+	// insert print
+	buffer.emit("print:");
+	buffer.emit("lw $a0, 0($sp)");
+	buffer.emit("li $v0, 4");
+	buffer.emit("syscall");
+	buffer.emit("jr $ra");
+	
+	//insert zero division error
+	buffer.emitData("str0: .asciiz	\"Error division by zero\\n\"");
+	buffer.emit("zeroDivision: ");
+	buffer.emit("la $a0, str0");
+	buffer.emit("li $v0, 4");
+	buffer.emit("syscall");
+	buffer.emit("li $v0, 10");
+	buffer.emit("syscall");
+	
+	//insert precond error
+	buffer.emitData("preCondErr_1: .asciiz	\"Precondition hasn't been satisfied for function \"");
+	buffer.emitData("endl_1: .asciiz  \"\\n\"");
+	buffer.emit("precond_1: la $a0, preCondErr_1");
+	buffer.emit("li $v0, 4");
+	buffer.emit("syscall");
+	buffer.emit("li $v0, 4");
+	buffer.emit("move $a0, $t0");
+	buffer.emit("syscall");
+	buffer.emit("li $v0, 4");
+	buffer.emit("la $a0, endl_1");
+	buffer.emit("syscall");
+	buffer.emit("li $v0, 10");
+	buffer.emit("syscall");	
+	
+	///////// add init_table to tables with the offset 0 //////////
+	tables.push_back(global_table);
+	offsets.push_back(0);
+	///////////////////////////////////////////////////////////////
+}	  
+
+//make a new table and add it to tables
+void makeTable() {
+	Table table = Table();
+	tables.push_back(table);
+	offsets.push_back(offsets.back());
+}
+
+//add the function to the table, a function is identified by returnType and funcName
+void addFuncToTable(string retType, string funcName) {
+	Table table = tables.back();
+	offsets.push_back(offsets.back());
+	vector<Symbol> symbols_table = table.getSymbolsVector();
+	vector<string> argTypes;
+	for (int i = 0; i < symbols_table.size(); i++) 
+		argTypes.push_back(symbols_table[i].type);
+	Symbol s = {funcName, output::makeFunctionType(retType, argTypes), 0, 0, argTypes, retType, precond_number};
+	precond_number = 0;
+	if (alreadyDefined(s.name, true, true)) { //in case the function is already defined
+		output::errorDef(fun_dec_line_num, funcName);
+		exit(0);
+	}
+	(tables.front()).push(s);
+}
+
+//returns true if the identefier is already defined
+bool alreadyDefined(string identefier, bool new_decliration, bool is_function) {
+	int i = new_decliration ? 0 : 1;
+	for (; i < (is_function ? 1 : tables.size()); i++) {
+		vector<Symbol> symbol_table = tables[i].getSymbolsVector();
+		for (int j = 0; j < symbol_table.size(); j++)
+			if (symbol_table[j].name == identefier)
+				return true;
+	}
+	return false;
+}
+
+/*return the corresponding symbol which identified by the identifier.
+  we guarantee that the use of this function is only done if the symbol is already defined*/
+Symbol getSymbol(string identefier) {
+	for (int i = 0; i < tables.size(); i++) {
+		vector<Symbol> symbol_table = tables[i].getSymbolsVector();
+		for (int j = 0; j < symbol_table.size(); j++)
+			if (symbol_table[j].name == identefier)
+				return symbol_table[j];
+	}
+	Symbol s;
+	return s;	
+}
+
+//closes the current scope and pops it's symbols, is_function is true when the closing scope belongs to a function
+void closeScope(string identefier,bool is_function) {
+	int stack_pop = 0;
+	Table table = tables.back();
+	vector<Symbol> symbol_table = table.getSymbolsVector();
+	for (int i = 0; i < symbol_table.size(); i++) {
+		if (symbol_table[i].offset >= 0)
+			stack_pop += 4;
+	}
+	buffer.emit("addu, $sp, $sp, " + toString(stack_pop));
+	tables.pop_back();
+	offsets.pop_back();	
+}
+
+//add a new argument to the function
+void addArg(string type, string identefier) {
+	func_arg_offset--;
+	Symbol arg = {identefier, type, func_arg_offset};
+	if (alreadyDefined(identefier, true, false)) {
+		output::errorDef(yylineno, identefier);
+		exit(0);
+	}
+	(tables.back()).push(arg);
+}
+
+//add a new symbol //TODO
+void addSymbol(string type, string identefier) {
+	Symbol symbol = {identefier, type, offsets.back(), 0, vector<string>()};
+	if (alreadyDefined(identefier, true, false)) {
+		output::errorDef(yylineno, identefier);
+		exit(0);
+	}
+	offsets.back()++;
+	(tables.back()).push(symbol);
+}
+
+//returns true if the assignment is legal
+bool legalAssign(string lhs_type, string rhs_type) {
+	if (lhs_type == rhs_type)
+		return true;
+	// byte can be converted to int
+	if (lhs_type == "INT" && rhs_type == "BYTE")
+		return true;
+	return false;
+}
+
+//update the val of the symbol identified by "identefier" with "val"
+void updateVal(string identefier, int val) {
+		for (int i = 0; i < tables.size(); i++) {
+			vector<Symbol> symbol_table = tables[i].getSymbolsVector();
+			for (int j = 0; j < symbol_table.size(); j++)
+				if (symbol_table[j].name == identefier)
+					symbol_table[j].val = val;
+		}
+}
+
+/*returns the return type of the function if it's a legal call,
+  otherwise prints the corresponding error massage and exits*/
+string validCall(string funcName, vector<string> args_list) {
+	bool is_defined = false;
+	string ret_type;
+	vector<string> args;
+	vector<Symbol> symbol_table = tables[0].getSymbolsVector();
+	for (int j = 0; j < symbol_table.size(); j++) {
+		if (symbol_table[j].name == funcName) {
+			is_defined = true;
+			ret_type = symbol_table[j].retType;
+			args = symbol_table[j].args_types;
+		}	
+	}
+	if (!is_defined) {
+		output::errorUndefFunc(yylineno, funcName);
+		exit(0);
+	}
+	if (args_list.size() != args.size()) {
+		output::errorPrototypeMismatch(yylineno, funcName, args);
+		exit(0);
+	}
+	for (int i = 0; i < args.size(); i++) {
+		if (args[i] != args_list[i]) {
+			if (!(args[i] == "INT" && args_list[i] == "BYTE")) {
+				output::errorPrototypeMismatch(yylineno, funcName, args);
+				exit(0);
+			}
+		}
+	}
+	return ret_type;
+}
+
+//syntax error
+void yyerror(const char* message) {
+	output::errorSyn(yylineno);
+	exit(0);
+}
+
+
+//end the program
+void endProg() {
+	int has_main = 0;
+	vector<Symbol> global_table_symbols = tables[0].getSymbolsVector();	
+	for (int i = 0; i < global_table_symbols.size(); i++) {	
+		if (global_table_symbols[i].name == "main" && global_table_symbols[i].type == "()->VOID") 
+			has_main = 1;
+	}
+	if (!has_main) {
+		output::errorMainMissing();
+		exit(0);
+	}
+	/*output::endScope();
+	for (int i = 0; i < global_table_symbols.size(); i++)	
+		output::printID(global_table_symbols[i].name, 
+					global_table_symbols[i].offset, global_table_symbols[i].type);*/
+	buffer.printDataBuffer();
+	buffer.printCodeBuffer();
+}
+
+// HW5
+string getVarValueToReg(string var_name) {
+	int offset = getSymbol(var_name).offset;
+	int distance = offset*(-4);
+	string reg = reg_pool.getReg();
+	buffer.emit("lw " + reg + ", " + toString(distance) + "($fp)");
+	return reg;
+}
+
+void updateVarInStack(string var_name, string new_val) {
+	int offset = getSymbol(var_name).offset;
+	int distance = offset*(-4);
+	buffer.emit("sw " + new_val + ", " + toString(distance) + "($fp)");
+}
+
+void copyAllValues(STYPE& a, STYPE& b) {
+	a.name = b.name;
+	a.type = b.type;
+	a.offset = b.offset;
+	a.val = b.val;
+	a.args_types = b.args_types;
+	a.retType = b.retType;
+	a.number_of_preconditions = b.number_of_preconditions;
+	// hw5
+	a.reg = b.reg;
+	a.quad = b.quad;
+	a.nextList = b.nextList;
+	a.falseList = b.falseList;
+	a.trueList = b.trueList;
+	a.regsList = b.regsList;
+	a.continueList =  b.continueList;
+	a.breakList = b.breakList;
+}
+
+void makeFuncLabel(string func_name) {
+	buffer.emit(func_name +":");
+	buffer.emit("addu $fp, $sp, -4");
+}	
